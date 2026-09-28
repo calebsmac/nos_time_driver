@@ -17,6 +17,7 @@ ivv-itc@lists.nasa.gov
 
 /* Standard Includes */
 #include <thread>
+#include <chrono>
 #include <string>
 #include <curses.h>
 #include <climits>
@@ -38,6 +39,10 @@ ivv-itc@lists.nasa.gov
 namespace Nos3
 {
     REGISTER_HARDWARE_MODEL(TimeDriver,"TimeDriver");
+
+    // How close to a tick's deadline run() stops sleeping and spins: most of
+    // the operating system's usual wake-up delay.
+    static const std::chrono::microseconds SPIN(200);
 
     extern ItcLogger::Logger *sim_logger; // defined by the host executable
 
@@ -111,14 +116,28 @@ namespace Nos3
             noecho();
             int key = getch();
             double pause_duration, pause_at;
+            std::chrono::steady_clock::time_point next_tick = std::chrono::steady_clock::now();
 
             while (1) 
             {
-                do {
-                    //std::this_thread::sleep_for(std::chrono::microseconds(_real_microseconds_per_tick/10));
-                    gettimeofday(&_now, NULL);
-                    _last_time_diff = time_diff();
-                } while (_last_time_diff < _real_microseconds_per_tick);
+                // Each tick is due one period after the previous one was due
+                // (not after it was sent), so a late wake-up is made up on the
+                // next tick and the average rate stays exact. Sleep until
+                // shortly before the deadline and spin the rest, rather than
+                // holding a core busy-waiting between ticks.
+                const auto period = std::chrono::microseconds((int64_t)_real_microseconds_per_tick);
+                next_tick += period;
+                auto now = std::chrono::steady_clock::now();
+                if (now - next_tick > period) {
+                    next_tick = now;    // fell behind (paused, or a slow tick): resynchronise, no burst
+                }
+                if (next_tick - now > SPIN) {
+                    std::this_thread::sleep_until(next_tick - SPIN);
+                }
+                while (std::chrono::steady_clock::now() < next_tick) {
+                }
+                gettimeofday(&_now, NULL);
+                _last_time_diff = time_diff();
 
     			int64_t ticks_per_second = 1000000/_real_microseconds_per_tick;
                 _then = _now;
